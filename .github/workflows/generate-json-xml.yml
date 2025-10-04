@@ -1,0 +1,117 @@
+# Nama workflow di-update untuk mencerminkan semua tugasnya
+name: Build and Generate Site Files
+
+on:
+  push:
+    branches: ["main"]
+    # === Pemicu kembali ke struktur 'artikel/' ===
+    paths:
+      - 'artikel/*.html'
+  workflow_dispatch:
+  schedule:
+    - cron: '0 21 * * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: "1. Checkout Repository"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "2. Setup Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: "3. Install Dependencies"
+        run: npm ci
+
+      - name: "4. Generate artikel.json & sitemap.xml"
+        run: node ext/generator.js
+
+      - name: "5. Generate RSS Feed"
+        run: node ext/rss.js
+        env:
+          RSS_LIMIT: 30
+
+      - name: "6. Generate 'artikel-terbaru.html' page"
+        run: node ext/build-page.js
+
+      - name: "7. Generate Article Cover Images"
+        run: |
+          echo "Mempersiapkan server untuk screenshot..."
+          npm install http-server
+          nohup ./node_modules/.bin/http-server . -p 8080 --silent &
+          sleep 2
+          
+          echo "Mulai memproses file HTML untuk screenshot..."
+          PLAYWRIGHT_IMAGE="mcr.microsoft.com/playwright:v1.55.1-jammy"
+          
+          # === Loop sekarang mencari file di folder 'artikel/' ===
+          find artikel -name "*.html" | while read -r HTML_FILE; do
+            BASE_NAME=$(basename "$HTML_FILE" .html)
+            FINAL_PATH="artikel/${BASE_NAME}.jpg"
+            TEMP_OUTPUT="temp_screenshot.jpg"
+            
+            if [ -f "$FINAL_PATH" ]; then
+              echo "✅ Screenshot sudah ada: $FINAL_PATH. Dilewati."
+            else
+              echo "⏳ Mengambil screenshot untuk: $HTML_FILE"
+              LOCAL_URL="http://localhost:8080/$HTML_FILE"
+              
+              docker run --rm --network host -v "${PWD}:/workspace" -w /workspace "$PLAYWRIGHT_IMAGE" \
+                bash -c "npm install playwright && node ext/screenshot.js '$LOCAL_URL' '$TEMP_OUTPUT'"
+              
+              if [ -f "$TEMP_OUTPUT" ]; then
+                mv "$TEMP_OUTPUT" "$FINAL_PATH"
+                echo "✅ Screenshot baru berhasil disimpan: $FINAL_PATH"
+              else
+                echo "❌ Gagal membuat screenshot untuk $HTML_FILE."
+              fi
+            fi
+          done
+
+      - name: "8. Commit and Push All Generated Files"
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if [[ -z $(git status -s) ]]; then
+            echo "✅ Tidak ada perubahan file, tidak perlu commit."
+            exit 0
+          fi
+          
+          echo "✅ Perubahan ditemukan. Melakukan commit..."
+          git add .
+          git commit -m "build: 🚀 Update file-file yang di-generate (auto)"
+          
+          echo "🔃 Melakukan sinkronisasi dengan remote repository..."
+          git pull --rebase origin main
+          
+          echo "🚀 Mendorong perubahan ke server..."
+          git push origin main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "9. Show Published Links & Summary"
+        if: always()
+        run: |
+          echo "✅ File yang di-generate (seharusnya):"
+          echo "🔗 artikel.json: https://frijal.github.io/artikel.json"
+          echo "🔗 sitemap.xml : https://frijal.github.io/sitemap.xml"
+          echo "🔗 rss.xml     : https://frijal.github.io/rss.xml"
+          echo "🔗 rss.html    : https://frijal.github.io/rss.html"
+          echo ""
+          
+          echo "📊 Jumlah total artikel saat ini:"
+          # === Cara menghitung file kembali ke 'artikel/' ===
+          COUNT=$(ls artikel/*.html 2>/dev/null | wc -l)
+          echo "➡️  $COUNT artikel di folder artikel/"
+
+
+
